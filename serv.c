@@ -15,13 +15,16 @@ void childend(int signo)
     printf("##############\n");
 }
 
-int _read(int cfd, char* buf){
+int _read(int cfd, char* buf, int buf_size){
     int x = 0;
-    while(strncmp(buf+x, "\n", 2) != 0){
-        int j = read(cfd, buf + x, sizeof(buf)-x);
+    while(x < 2 || strncmp(buf+x-2, "\n\n", 2) != 0){
+        int j = read(cfd, buf + x, buf_size-x);
+        if (j == 0) {
+            break;
+        }
         x = x + j;
-        printf("%d\n",j);
     }
+    return x;
 }
 
 int _write(int cfd, char* buf, int len){
@@ -53,13 +56,31 @@ void init_db(){
     }else{
         fprintf(stderr, "Opened database successfully\n");
     }
-    const char* table_query = "CREATE TABLE IF NOT EXISTS Messages (id INTEGER PRIMARY KEY, sender TEXT, receiver TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);";
-    rc = exec_sql_query(table_query);
+    const char* msg_table_query = "CREATE TABLE IF NOT EXISTS Messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender INTEGER REFERENCES Users(id), receiver INTEGER REFERENCES Users(id), content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status INTEGER);";
+    rc = exec_sql_query(msg_table_query);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
-}
+    const char* users_table_query = "CREATE TABLE IF NOT EXISTS Users (id INTEGER PRIMARY KEY, password TEXT, status INTEGER);";
+    rc = exec_sql_query(users_table_query);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    const char* users_insert_query = "INSERT OR REPLACE INTO Users (id, password, status) VALUES (123456789, 'admin', 1);";
+    rc = exec_sql_query(users_insert_query);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    users_insert_query = "INSERT OR REPLACE INTO Users (id, password, status) VALUES (987654321, 'user', 1);";
+    rc = exec_sql_query(users_insert_query);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    }
 
 void close_db(){
     sqlite3_close(db);
@@ -68,7 +89,7 @@ void close_db(){
 void add_msg_to_db(const char* sender, const char* receiver, const char* content){
     char* err = 0;
     char query[256];
-    sprintf(query, "INSERT INTO Messages (sender, receiver, content) VALUES ('%s', '%s', '%s');", sender, receiver, content);
+    sprintf(query, "INSERT INTO Messages (sender, receiver, content, status) VALUES ('%s', '%s', '%s', 0);", sender, receiver, content);
     int rc = sqlite3_exec(db, query, 0, 0, &err);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", err);
@@ -76,7 +97,7 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-void send_msg(int cfd, const char* msg){
+void send_msg(int cfd, char* msg){
     _write(cfd, msg, strlen(msg));
 }
 
@@ -145,6 +166,8 @@ int main(int argc, char**argv) {
     bind(sfd, (struct sockaddr*)&saddr, sizeof(saddr));
     listen(sfd, 10);
 
+    printf("Server address: %s\n", inet_ntoa(saddr.sin_addr));
+
     while (1)
     {
         sl = sizeof(caddr);
@@ -157,51 +180,74 @@ int main(int argc, char**argv) {
                    inet_ntoa((struct in_addr)caddr.sin_addr), //inet network to address
                    ntohs(caddr.sin_port));
 
-            int rc=_read(cfd, buf);
+            int rc=_read(cfd, buf, sizeof(buf));
             if (strncmp(buf, "SEND_MESSAGE", 12) == 0)
             {
-                char sender[64], receiver[64], content[256];
-                _read(cfd, sender);
-                _read(cfd, receiver);
-                _read(cfd, content);
-
+                char *sender = memcpy(malloc(10), buf + 13, 9);
+                sender[9] = '\0';
+                char *receiver = memcpy(malloc(10), buf + 23, 9);
+                receiver[9] = '\0';
+                char *content = memcpy(malloc(256), buf + 32, sizeof(buf) - 32);
+                content[sizeof(buf) - 32] = '\0';
+                
                 add_msg_to_db(sender, receiver, content);
-                send_msg(cfd, "Message sent\n");
+                ssize_t bytes_written = write(cfd, "Message sent\n", 13);
+                if (bytes_written < 0) {
+                    perror("error writing to socket");
+                }
+                
+                free(sender);
+                free(receiver);
+                free(content);
                 memset(buf, 0, sizeof(buf));
             }
             else if (strncmp(buf, "GET_MESSAGES", 12) == 0)
             {
-                const char* user = buf + 13;
+                char *user = memcpy(malloc(10), buf + 13, 9);
+                user[9] = '\0';
                 char query[256];
                 sprintf(query, "SELECT * FROM Messages WHERE receiver='%s';", user);
                 read_msg_from_db(cfd, query);
+                free(user);
+                memset(buf, 0, sizeof(buf));
             }
             else if (strncmp(buf, "GET_ALL_MESSAGES", 16) == 0)
             {
-                const char* user = buf + 17;
+                char *user = memcpy(malloc(10), buf + 17, 9);
+                user[9] = '\0';
                 char query[256];
                 sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' OR sender='%s';", user, user);
                 read_msg_from_db(cfd, query);
+                free(user);
+                memset(buf, 0, sizeof(buf));
             }
             else if (strncmp(buf, "GET_NEW_MESSAGES", 16) == 0)
             {
-                const char* user = buf + 17;
+                char *user = memcpy(malloc(10), buf + 17, 9);
                 char query[256];
                 sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' AND status=0;", user);
                 read_msg_from_db(cfd, query);
+                free(user);
+                memset(buf, 0, sizeof(buf));
             }
             else if (strncmp(buf, "SET_MESSAGE_STATUS", 18) == 0)
             {
-                char* id = buf + 19;
+                char *id = memcpy(malloc(10), buf + 19, 9);
+                id[9] = '\0';
                 char query[256];
                 sprintf(query, "UPDATE Messages SET status=1 WHERE id=%s;", id);
                 exec_sql_query(query);
                 send_msg(cfd, "Message status updated\n");
+                free(id);
+                memset(buf, 0, sizeof(buf));
             }
             else if (strncmp(buf, "GET_USER_STATUS", 15) == 0)
             {
-                const char* user = buf + 16;
+                char *user = memcpy(malloc(2), buf + 16, 1);
+                user[1] = '\0';
                 check_user_status(cfd, user);
+                free(user);
+                memset(buf, 0, sizeof(buf));
             }
             else {
                 strcpy(buf,"\0\0\0\0\0\0\0\0\n");
