@@ -32,9 +32,103 @@ int _write(int cfd, char* buf, int len){
     }
 }
 
+sqlite3 *db;
+
+
+//funkcja wywolywana przy kazdym wierszu zapytania
+int exec_sql_query(const char* query){
+    char* err = 0;
+    int rc = sqlite3_exec(db, query, 0, 0, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", err);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void init_db(){
+    int rc = sqlite3_open("test.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }else{
+        fprintf(stderr, "Opened database successfully\n");
+    }
+    const char* table_query = "CREATE TABLE IF NOT EXISTS Messages (id INTEGER PRIMARY KEY, sender TEXT, receiver TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);";
+    rc = exec_sql_query(table_query);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void close_db(){
+    sqlite3_close(db);
+}
+
+void add_msg_to_db(const char* sender, const char* receiver, const char* content){
+    char* err = 0;
+    char query[256];
+    sprintf(query, "INSERT INTO Messages (sender, receiver, content) VALUES ('%s', '%s', '%s');", sender, receiver, content);
+    int rc = sqlite3_exec(db, query, 0, 0, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", err);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void send_msg(int cfd, const char* msg){
+    _write(cfd, msg, strlen(msg));
+}
+
+//funkcja przyjmuje zapytanie sql i wysyla wynik do klienta w postaci pliku json
+void read_msg_from_db(int cfd, const char* query) {
+    char* err = 0;
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        char json_row[512];
+        snprintf(json_row, sizeof(json_row), 
+                 "{\"sender\": \"%s\", \"recipient\": \"%s\", \"message\": \"%s\", \"timestamp\": \"%s\", \"status\": %d}\n",
+                 sqlite3_column_text(stmt, 0),
+                 sqlite3_column_text(stmt, 1),
+                 sqlite3_column_text(stmt, 2),
+                 sqlite3_column_text(stmt, 3),
+                 sqlite3_column_int(stmt, 4));
+        _write(cfd, json_row, strlen(json_row));
+    }
+    sqlite3_finalize(stmt);
+}
+
+void check_user_status(int cfd, const char* user){
+    char query[256];
+    sprintf(query, "SELECT status FROM users WHERE username='%s';", user);
+    char* err = 0;
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        char json_row[512];
+        snprintf(json_row, sizeof(json_row), 
+                 "{\"status\": %d}\n",
+                 sqlite3_column_int(stmt, 0));
+        _write(cfd, json_row, strlen(json_row));
+    }
+}
+
+
+
 
 //serwer
 int main(int argc, char**argv) {
+    init_db();
+    
     socklen_t sl;
     int sfd, cfd, on = 1;
     struct sockaddr_in saddr, caddr;
@@ -64,15 +158,50 @@ int main(int argc, char**argv) {
                    ntohs(caddr.sin_port));
 
             int rc=_read(cfd, buf);
-            if (strncmp(buf, "154030", 6) == 0)
+            if (strncmp(buf, "SEND_MESSAGE", 12) == 0)
             {
-                strcpy(buf,"\0\0\0\0\0\0\0\0\n");
-                _write(cfd, "Czesc Bartek\n", 14);
+                char sender[64], receiver[64], content[256];
+                _read(cfd, sender);
+                _read(cfd, receiver);
+                _read(cfd, content);
+
+                add_msg_to_db(sender, receiver, content);
+                send_msg(cfd, "Message sent\n");
+                memset(buf, 0, sizeof(buf));
             }
-            else if (strncmp(buf, "154042", 6) == 0)
+            else if (strncmp(buf, "GET_MESSAGES", 12) == 0)
             {
-                strcpy(buf,"\0\0\0\0\0\0\0\0\n");
-                _write(cfd, "Czesc Kacper\n", 14);
+                const char* user = buf + 13;
+                char query[256];
+                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s';", user);
+                read_msg_from_db(cfd, query);
+            }
+            else if (strncmp(buf, "GET_ALL_MESSAGES", 16) == 0)
+            {
+                const char* user = buf + 17;
+                char query[256];
+                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' OR sender='%s';", user, user);
+                read_msg_from_db(cfd, query);
+            }
+            else if (strncmp(buf, "GET_NEW_MESSAGES", 16) == 0)
+            {
+                const char* user = buf + 17;
+                char query[256];
+                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' AND status=0;", user);
+                read_msg_from_db(cfd, query);
+            }
+            else if (strncmp(buf, "SET_MESSAGE_STATUS", 18) == 0)
+            {
+                char* id = buf + 19;
+                char query[256];
+                sprintf(query, "UPDATE Messages SET status=1 WHERE id=%s;", id);
+                exec_sql_query(query);
+                send_msg(cfd, "Message status updated\n");
+            }
+            else if (strncmp(buf, "GET_USER_STATUS", 15) == 0)
+            {
+                const char* user = buf + 16;
+                check_user_status(cfd, user);
             }
             else {
                 strcpy(buf,"\0\0\0\0\0\0\0\0\n");
@@ -85,7 +214,7 @@ int main(int argc, char**argv) {
         close(cfd);
     }
     close(sfd);
-
+    close_db();
     return EXIT_SUCCESS;
     //konsola komenda strace "nazwa_serwera" - wypisuje w konsoli wszystkie wywolane funkcje serwera
 }
