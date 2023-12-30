@@ -16,7 +16,7 @@ def main():
             recipient = input("Wpisz odbiorcę: ")
             text = input("Wpisz treść wiadomości: ")
 
-            message = "SEND_MESSAGE\n{}\n{}\n{}\n".format(sender, recipient, text)
+            message = "SEND_MESSAGE\n{}\n{}\n{}\n\n".format(sender, recipient, text)
             client_socket.sendall(message.encode())
             print("Wysłano wiadomość do serwera")
 
