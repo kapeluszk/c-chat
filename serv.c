@@ -12,7 +12,7 @@
 void childend(int signo)
 {
     wait(NULL);
-    printf("##############\n");
+    printf("##connection closed##\n");
 }
 
 int _read(int cfd, char* buf, int buf_size){
@@ -97,10 +97,6 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-void send_msg(int cfd, char* msg){
-    _write(cfd, msg, strlen(msg));
-}
-
 //funkcja przyjmuje zapytanie sql i wysyla wynik do klienta w postaci pliku json
 void read_msg_from_db(int cfd, const char* query) {
     char* err = 0;
@@ -111,16 +107,19 @@ void read_msg_from_db(int cfd, const char* query) {
         exit(EXIT_FAILURE);
     }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        char json_row[512];
+        char json_row[1024];
         snprintf(json_row, sizeof(json_row), 
-                 "{\"sender\": \"%s\", \"recipient\": \"%s\", \"message\": \"%s\", \"timestamp\": \"%s\", \"status\": %d}\n",
-                 sqlite3_column_text(stmt, 0),
+                 "{\"sender\": \"%s\", \"recipient\": \"%s\", \"message\": \"%s\", \"timestamp\": \"%s\", \"status\": %d}",
+                 //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiersza
                  sqlite3_column_text(stmt, 1),
                  sqlite3_column_text(stmt, 2),
                  sqlite3_column_text(stmt, 3),
-                 sqlite3_column_int(stmt, 4));
+                 sqlite3_column_text(stmt, 4),
+                 sqlite3_column_int(stmt, 5));
         _write(cfd, json_row, strlen(json_row));
+        
     }
+    _write(cfd,"\n\n",2);
     sqlite3_finalize(stmt);
 }
 
@@ -201,16 +200,6 @@ int main(int argc, char**argv) {
                 free(content);
                 memset(buf, 0, sizeof(buf));
             }
-            else if (strncmp(buf, "GET_MESSAGES", 12) == 0)
-            {
-                char *user = memcpy(malloc(10), buf + 13, 9);
-                user[9] = '\0';
-                char query[256];
-                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s';", user);
-                read_msg_from_db(cfd, query);
-                free(user);
-                memset(buf, 0, sizeof(buf));
-            }
             else if (strncmp(buf, "GET_ALL_MESSAGES", 16) == 0)
             {
                 char *user = memcpy(malloc(10), buf + 17, 9);
@@ -249,9 +238,8 @@ int main(int argc, char**argv) {
                 free(user);
                 memset(buf, 0, sizeof(buf));
             }
-            else {
-                strcpy(buf,"\0\0\0\0\0\0\0\0\n");
-                _write(cfd, "Nieprawidlowy indeks\n", 22);
+            else if (strncmp(buf, "LOGIN", 5) == 0){
+
             }
 
             return EXIT_SUCCESS;

@@ -3,6 +3,14 @@
 
 import socket
 
+def recv_until_newline(client_socket):
+    data = b""
+    while not data.endswith("\n\n"):
+        chunk = client_socket.recv(1024)
+        if chunk == b'':
+            break
+        data += chunk
+    return data
 
 def main():
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -13,20 +21,18 @@ def main():
     try:
         while True:
             sender = input("Wpisz nadawcę: ")
-            recipient = input("Wpisz odbiorcę: ")
-            text = input("Wpisz treść wiadomości: ")
 
-            message = "SEND_MESSAGE\n{}\n{}\n{}\n\n".format(sender, recipient, text)
+            message = "GET_ALL_MESSAGES\n{}\n\n".format(sender)
             client_socket.sendall(message.encode())
             print("Wysłano wiadomość do serwera")
 
             
             print("Oczekiwanie na odpowiedź serwera...")
-            response = client_socket.recv(13)
+            response = recv_until_newline(client_socket)
             if len(response) == 0:
                 print("Nie otrzymano odpowiedzi od serwera")
             else:
-                print("Odpowiedź serwera:", response.decode())
+                print("Odpowiedź serwera:", response)
 
     except KeyboardInterrupt:
         print("Zamykanie klienta...")
