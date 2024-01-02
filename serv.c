@@ -4,10 +4,79 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <pthread.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <arpa/inet.h>
 #include <sqlite3.h>
+
+struct cln {
+    int cfd;
+    struct sockaddr_in caddr;
+};
+
+typedef struct user{
+    int fd;
+    char id[10];
+    struct user *next;
+} User;
+
+User *users = NULL;
+
+void add_user(int fd, char* id){
+    User *new_user = malloc(sizeof(User));
+    new_user->fd = fd;
+    strncpy(new_user->id, id, 10);
+    new_user->next = users;
+    users = new_user;
+}
+
+//funkcja zwraca fd uzytkownika o podanym id lub -1 jesli nie ma takiego uzytkownika
+int find_user(char* id){
+    User *current = users;
+    while(current != NULL){
+        if(strcmp(current->id, id) == 0){
+            return current->fd;
+        }
+        current = current->next;
+    }
+    return -1;
+}
+
+void delete_user(int fd){
+    User *current = users;
+    User *prev = NULL;
+    while(current != NULL){
+        if(current->fd == fd){
+            if(prev == NULL){
+                users = current->next;
+            }else{
+                prev->next = current->next;
+            }
+            free(current);
+            return;
+        }
+        prev = current;
+        current = current->next;
+    }
+}
+
+void list_users(){
+    User *current = users;
+    while(current != NULL){
+        printf("%s\n", current->id);
+        current = current->next;
+    }
+}
+
+void delete_list(){
+    User *current = users;
+    while(current != NULL){
+        User *next = current->next;
+        free(current);
+        current = next;
+    }
+}
 
 void childend(int signo)
 {
@@ -74,7 +143,7 @@ void init_db(){
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
-    users_insert_query = "INSERT OR REPLACE INTO Users (id, password, status) VALUES (987654321, 'user', 1);";
+    users_insert_query = "INSERT OR REPLACE INTO Users (id, password, status) VALUES (987654321, 'user1', 1);";
     rc = exec_sql_query(users_insert_query);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
@@ -86,10 +155,17 @@ void close_db(){
     sqlite3_close(db);
 }
 
-void add_msg_to_db(const char* sender, const char* receiver, const char* content){
+void send_msg(int cfd, const char* msg){
+    ssize_t bytes_written = write(cfd, msg, strlen(msg));
+    if (bytes_written < 0) {
+        perror("error writing to socket");
+    }
+}
+
+void add_msg_to_db(const char* sender, const char* receiver, const char* content, int status){
     char* err = 0;
     char query[256];
-    sprintf(query, "INSERT INTO Messages (sender, receiver, content, status) VALUES ('%s', '%s', '%s', 0);", sender, receiver, content);
+    sprintf(query, "INSERT INTO Messages (sender, receiver, content, status) VALUES ('%s', '%s', '%s', '%d');", sender, receiver, content, status);
     int rc = sqlite3_exec(db, query, 0, 0, &err);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", err);
@@ -142,18 +218,112 @@ void check_user_status(int cfd, const char* user){
     }
 }
 
+int check_credentials(const char* username, const char* password){
+    char query[256];
+    sprintf(query, "SELECT * FROM users WHERE id='%s' AND password='%s';", username, password);
+    char* err = 0;
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        return 1;
+    }
+    return 0;
+}
 
+void* cthread(void* arg){
+    struct cln* c = (struct cln*)arg;
+    printf("new connection from: %s:%d\n",
+            inet_ntoa((struct in_addr)c->caddr.sin_addr), //inet network to address
+            ntohs(c->caddr.sin_port));
 
+    //wysylamy komunikat login - na niego klient odpowie swoim loginem i haslem 
+    const char* login_msg = "LOGIN\n\n";
+    send_msg(c->cfd, login_msg);
+    
+    char buf[512];
+    while (1) {
+        int rc = _read(c->cfd, buf, sizeof(buf));
+        if (rc == 0) {
+            printf("connection closed\n");
+            delete_user(c->cfd);
+            close(c->cfd);
+            free(c);
+            return NULL;
+        }else if (rc < 0) {
+            perror("error reading from socket");
+            close(c->cfd);
+            free(c);
+            return NULL;
+        }else if (strncmp(buf, "LOGIN",5) == 0){
+            char* username = memcpy(malloc(10), buf+6, 10);
+            char* password = memcpy(malloc(6), buf+16, 6);
+            username[9] = '\0';
+            password[5] = '\0';
+            if (check_credentials(username, password)){
+                add_user(c->cfd, username);
+                send_msg(c->cfd, "LOGIN_OK\n\n");
+                list_users();
+            }else{
+                send_msg(c->cfd, "LOGIN_NOT_OK\n\n");
+                printf("%s\n%s", username, password);
+            }
+            free(username);
+            free(password);
+        }else if(strncmp(buf, "SEND_MESSAGE", 12) == 0){
+            char* sender = memcpy(malloc(10), buf+13, 10);
+            char* receiver = memcpy(malloc(10), buf+24, 10);
+            char* content = memcpy(malloc(256), buf+35, 256);
+            sender[10] = '\0';
+            receiver[10] = '\0';
+            content[256] = '\0';
+            int receiver_fd = find_user(receiver);
+            if(receiver_fd != -1){
+                char msg[512];
+                sprintf(msg, "MESSAGE\n\n{\"sender\": \"%s\", \"message\": \"%s\"}\n\n", sender, content);
+                send_msg(receiver_fd, msg);
+                add_msg_to_db(sender, receiver, content, 1);
+                char* msg_sent = "MESSAGE_SENT\n\n";
+                send_msg(c->cfd, msg_sent);
+            }else{
+                add_msg_to_db(sender, receiver, content, 0);
+                char* msg_not_delivered = "MESSAGE_NOT_DELIVERED\n\n";
+                send_msg(c->cfd, msg_not_delivered);
+            }
+            free(sender);
+            free(receiver);
+            free(content);
+        }else if(strncmp(buf, "GET_ALL_MESSAGES", 16) == 0){
+            char* user = memcpy(malloc(10), buf+17, 10);
+            user[10] = '\0';
+            char query[256];
+            sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' OR sender='%s';", user, user);
+            read_msg_from_db(c->cfd, query);
+            free(user);
+        }else if(strncmp(buf, "LOGOUT", 6) == 0){
+            delete_user(c->cfd);
+            close(c->cfd);
+            free(c);
+            return NULL;
+        }
+    }
+}
 
 //serwer
 int main(int argc, char**argv) {
+    
     init_db();
     
+    
     socklen_t sl;
+    pthread_t tid;
     int sfd, cfd, on = 1;
     struct sockaddr_in saddr, caddr;
     char buf[256];
-
+    
     signal(SIGCHLD, childend);
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = INADDR_ANY; //dowolny adres ip ktory mamy skonfigurowany
@@ -167,119 +337,18 @@ int main(int argc, char**argv) {
 
     printf("Server address: %s\n", inet_ntoa(saddr.sin_addr));
 
-    while (1)
-    {
+    while (1){
+        struct cln* c = malloc(sizeof(struct cln));
         sl = sizeof(caddr);
-        cfd = accept(sfd, (struct sockaddr*)&caddr, &sl);
 
-        if(!fork())
-        {
-            close(sfd);
-            printf("new connection from: %s:%d\n",
-                   inet_ntoa((struct in_addr)caddr.sin_addr), //inet network to address
-                   ntohs(caddr.sin_port));
+        c->cfd = accept(sfd, (struct sockaddr*)&c->caddr, &sl);
 
-            int rc=_read(cfd, buf, sizeof(buf));
-            if (strncmp(buf, "SEND_MESSAGE", 12) == 0)
-            {
-                char *sender = memcpy(malloc(10), buf + 13, 9);
-                sender[9] = '\0';
-                char *receiver = memcpy(malloc(10), buf + 23, 9);
-                receiver[9] = '\0';
-                char *content = memcpy(malloc(256), buf + 32, sizeof(buf) - 32);
-                content[sizeof(buf) - 32] = '\0';
-                
-                add_msg_to_db(sender, receiver, content);
-                ssize_t bytes_written = write(cfd, "Message sent\n", 13);
-                if (bytes_written < 0) {
-                    perror("error writing to socket");
-                }
-                
-                free(sender);
-                free(receiver);
-                free(content);
-                memset(buf, 0, sizeof(buf));
-            }
-            else if (strncmp(buf, "GET_ALL_MESSAGES", 16) == 0)
-            {
-                char *user = memcpy(malloc(10), buf + 17, 9);
-                user[9] = '\0';
-                char query[256];
-                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' OR sender='%s';", user, user);
-                read_msg_from_db(cfd, query);
-                free(user);
-                memset(buf, 0, sizeof(buf));
-            }
-            else if (strncmp(buf, "GET_NEW_MESSAGES", 16) == 0)
-            {
-                char *user = memcpy(malloc(10), buf + 17, 9);
-                char query[256];
-                sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' AND status=0;", user);
-                read_msg_from_db(cfd, query);
-                free(user);
-                memset(buf, 0, sizeof(buf));
-            }
-            else if (strncmp(buf, "SET_MESSAGE_STATUS", 18) == 0)
-            {
-                char *id = memcpy(malloc(10), buf + 19, 9);
-                id[9] = '\0';
-                char query[256];
-                sprintf(query, "UPDATE Messages SET status=1 WHERE id=%s;", id);
-                exec_sql_query(query);
-                send_msg(cfd, "Message status updated\n");
-                free(id);
-                memset(buf, 0, sizeof(buf));
-            }
-            else if (strncmp(buf, "GET_USER_STATUS", 15) == 0)
-            {
-                char *user = memcpy(malloc(2), buf + 16, 1);
-                user[1] = '\0';
-                check_user_status(cfd, user);
-                free(user);
-                memset(buf, 0, sizeof(buf));
-            }
-            else if (strncmp(buf, "LOGIN", 5) == 0){
-
-            }
-
-            return EXIT_SUCCESS;
-        }
-
-        close(cfd);
+        pthread_create(&tid, NULL, cthread, c);
+        pthread_detach(tid);
     }
+    delete_list();
     close(sfd);
     close_db();
+    
     return EXIT_SUCCESS;
-    //konsola komenda strace "nazwa_serwera" - wypisuje w konsoli wszystkie wywolane funkcje serwera
 }
-/*
-write() to funkcja memcopy z pola procesu do bufora jądra systemu, z którego moduł tco tworzy pakiet
-i dalej leci do karty sieciowej. W buforze jądra jest zamek (problem producenta - procesu i konsumenta - jądra)
-write zwraca liczbę bajtów, które udało się skopiować z buforu procesu do bufora jądra.
-
-write musimy wywoływać tak długo aż suma i będzie równa N:
-i = write(fd, buf, N)
-
-po wysłaniu przez tcp pakietów jądro drugiego systemu przekazuje do bufora odbiorczego.
-funkcja read to rowniez memcopy z zamkiem - jedyna roznica, dziala w druga strone. kopiuje z bufora odbiorczego do bufora jadra
-
-read i write zwracają ilość bajtów, które udało się skopiować
-odczytujemy tak długo dopoki j = N
-j = read(fd, buf, M)
-
-read i write są funkcjami blokującymi
-gdy proces wysyłający skończy wysyłanie a odczytujący spróbuje odczytać jeszcze raz to będzie wisieć na blokadzie (będzie czekał na odpowiedź, której nie ma)
-
-Rozwiązania:
-1) komunikat z rozmiarem N - jak to zrobić skoro musimy odebrać go funkcją read()? musimy znac z gory wielkosc komunikatu i kolejne wiadomosci musza sie trzymac tego przesłanego ozmiaru
-2) stały rozmiar danych  - jeżeli wiadomość jest mniejsza niż stały rozmiar to uzupełniamy zerami - gdy większy niż stały rozmiar to nie wysyłamy wszystkich/wcale
-3) znak końca danych - odczytujemy tak długo aż napotkamy znak końca danych - musimy miec gwarancje ze znaku nie bedzie w danych (np pliki binarne moga zawierac znak konca danych)
-to są wszystkie rozwiązania
-
-http - 1) i 3)
-przesyłany jest nagłówek
-3) dla nagłówka to podwójny znak nowej linii \n\n
-1) jest przesyłane w nagłówku - moze być dowolne bo przekazywane jest w nagłówku kończącym się znakiem końca danych
-
-/proc/sys/net/ipv4/tcp_rmem lub tcp_wmem pliki z wielkością bufora. po lewej minimalna wielkosć, po srodku domyslna, po prawej maksymalnas
-*/
