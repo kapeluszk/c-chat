@@ -10,11 +10,16 @@
 #include <arpa/inet.h>
 #include <sqlite3.h>
 
+
+// ---------------sekcja z deklaracją listy uzytkownikow i funkcji do jej obslugi-----------------
+
+//struktura przechowujaca informacje o polaczeniu z klientem
 struct cln {
     int cfd;
     struct sockaddr_in caddr;
 };
 
+//lista uzytkownikow aktualnie zalogowanych
 typedef struct user{
     int fd;
     char id[10];
@@ -80,12 +85,11 @@ void delete_list(){
     }
 }
 
-void childend(int signo)
-{
-    wait(NULL);
-    printf("##connection closed##\n");
-}
+// ---------------koniec sekcji listy-----------------
 
+// ---------------sekcja z deklaracją funkcji zastepujacych read i write-----------------
+
+//funkcja zastepujaca read - czyta dane az do napotkania znakow konca komunikatu
 int _read(int cfd, char* buf, int buf_size){
     int x = 0;
     while(x < 2 || strncmp(buf+x-2, "\n\n", 2) != 0){
@@ -98,6 +102,7 @@ int _read(int cfd, char* buf, int buf_size){
     return x;
 }
 
+//funkcja zastepujaca write - sprawdza czy wszystkie dane zostaly wyslane
 int _write(int cfd, char* buf, int len){
     while(len > 0){
         int i = write(cfd,buf,len);
@@ -105,11 +110,17 @@ int _write(int cfd, char* buf, int len){
         buf += i;
     }
 }
+// ---------------koniec sekcji z funkcjami zastepujacymi read i write-----------------
 
+
+
+// ---------------sekcja z deklaracją funkcji do obslugi bazy danych-----------------
+
+//uchwyt do bazy danych
 sqlite3 *db;
 
 
-//funkcja wywolywana przy kazdym wierszu zapytania
+//funkcja wywoluje zapytanie sql i sprawdza czy nie wystapil blad
 int exec_sql_query(const char* query){
     char* err = 0;
     int rc = sqlite3_exec(db, query, 0, 0, &err);
@@ -119,6 +130,7 @@ int exec_sql_query(const char* query){
     }
 }
 
+//funkcja inicjalizuje baze danych - tworzy tabele jesli nie istnieja i dodaje uzytkownikow testowych
 void init_db(){
     int rc = sqlite3_open("test.db", &db);
     if (rc != SQLITE_OK) {
@@ -157,13 +169,9 @@ void close_db(){
     sqlite3_close(db);
 }
 
-void send_msg(int cfd, const char* msg){
-    ssize_t bytes_written = write(cfd, msg, strlen(msg));
-    if (bytes_written < 0) {
-        perror("error writing to socket");
-    }
-}
 
+
+//funkcja dodaje wiadomosc do bazy danych
 void add_msg_to_db(const char* sender, const char* receiver, const char* content, int status){
     char* err = 0;
     char query[256];
@@ -175,7 +183,7 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-
+//funkcja na podstawie podanych uzytkownikow zwraca wszystkie wiadomosci miedzy nimi
 void read_msg_from_db(int cfd, const char* user1, const char* user2) {
     char query[256];
     sprintf(query, "SELECT * FROM Messages WHERE (sender='%s' AND receiver='%s') OR (sender='%s' AND receiver='%s');", user1, user2, user2, user1);
@@ -186,12 +194,20 @@ void read_msg_from_db(int cfd, const char* user1, const char* user2) {
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
+    //tablica przechowujaca id wiadomosci do aktualizacji - wysylamy wiadomosci do klienta i zmieniamy status na 1 (dostarczona)
+    int toUpdate[100];
+    int i = 0;
     _write(cfd, "ALL_MESSAGES\n", 13);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         char msg[1024];
+        //jesli status wiadomosci jest 0 to dodajemy id do listy wiadomosci do aktualizacji
+        if (sqlite3_column_int(stmt, 5) == 0){
+            toUpdate[i] = sqlite3_column_int(stmt, 0);
+            i++;
+        }
         snprintf(msg, sizeof(msg), 
                  "%s\n%s\n%s\n%s\n%d",
-                 //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiersza
+                 //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiadomosci
                  sqlite3_column_text(stmt, 1),
                  sqlite3_column_text(stmt, 2),
                  sqlite3_column_text(stmt, 3),
@@ -201,9 +217,29 @@ void read_msg_from_db(int cfd, const char* user1, const char* user2) {
         
     }
     _write(cfd,"\n\n",2);
+    update_msg_status(toUpdate, 100);
     sqlite3_finalize(stmt);
 }
 
+//funkcja aktualizuje status wiadomosci na 1 (dostarczona) na podstawie listy id wiadomosci
+void update_msg_status(int msgList[], int size){
+    char query[256];
+    //przygotowujemy zapytanie UPDATE Messages SET status=1 WHERE id IN (1,2,3,4,5...);
+    sprintf(query, "UPDATE Messages SET status=1 WHERE id IN (");
+    for(int i = 0; i < size; i++){
+        char id[10];
+        sprintf(id, "%d,", msgList[i]);
+        strcat(query, id);
+    }
+    query[strlen(query) - 1] = ')';  // zamieniamy ostatni przecinek na nawias zamykajacy
+    strcat(query, ";");
+    char* err = 0;
+    int rc = sqlite3_exec(db, query, 0, 0, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", err);
+        exit(EXIT_FAILURE);
+    }
+}
 
 //funkcja na podstawie podanego id zwraca liste użytkowników, z którymi wysyłał wiadomości
 void get_user_list(int cfd, const char* user){
@@ -216,7 +252,9 @@ void get_user_list(int cfd, const char* user){
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
+    //wysylamy komunikat USER_LIST
     _write(cfd, "USER_LIST\n", 10);
+    //wysylamy liste uzytkownikow w petli
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         char msg[512];
         snprintf(msg, sizeof(msg), 
@@ -224,10 +262,12 @@ void get_user_list(int cfd, const char* user){
                  sqlite3_column_text(stmt, 1));
         _write(cfd, msg, strlen(msg));
     }
+    //wysylamy znaki konca komunikatu
     _write(cfd,"\n\n",2);
     sqlite3_finalize(stmt);
 }
 
+//funkcja na podstawie podanego id zwraca status użytkownika
 void check_user_status(int cfd, const char* user){
     char query[256];
     sprintf(query, "SELECT status FROM users WHERE username='%s';", user);
@@ -247,6 +287,7 @@ void check_user_status(int cfd, const char* user){
     }
 }
 
+//funkcja sprawdza czy podane dane logowania są poprawne
 int check_credentials(const char* username, const char* password){
     char query[256];
     sprintf(query, "SELECT * FROM users WHERE id='%s' AND password='%s';", username, password);
@@ -257,12 +298,23 @@ int check_credentials(const char* username, const char* password){
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
+    //jesli zapytanie zwroci wiersz to znaczy ze dane logowania sa poprawne
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         return 1;
     }
     return 0;
 }
 
+// ---------------koniec sekcji z funkcjami do obslugi bazy danych-----------------
+
+void send_msg(int cfd, const char* msg){
+    ssize_t bytes_written = _write(cfd, msg, strlen(msg));
+    if (bytes_written < 0) {
+        perror("error writing to socket");
+    }
+}
+
+//funkcja obslugujaca polaczenie z klientem w osobnym watku
 void* cthread(void* arg){
     struct cln* c = (struct cln*)arg;
     printf("new connection from: %s:%d\n",
@@ -276,22 +328,28 @@ void* cthread(void* arg){
     char buf[512];
     while (1) {
         int rc = _read(c->cfd, buf, sizeof(buf));
+        //jesli read zwroci 0 to znaczy ze klient sie rozlaczyl
         if (rc == 0) {
             printf("connection closed\n");
             delete_user(c->cfd);
             close(c->cfd);
             free(c);
             return NULL;
+        //jesli read zwroci mniej niz 0 to znaczy ze wystapil blad
         }else if (rc < 0) {
             perror("error reading from socket");
             close(c->cfd);
             free(c);
             return NULL;
+        //ponizej sprawdzamy jaki komunikat przyslal klient i wykonujemy odpowiednie akcje
         }else if (strncmp(buf, "LOGIN",5) == 0){
+            //wyciagamy z bufora login i haslo
             char* username = memcpy(malloc(10), buf+6, 10);
             char* password = memcpy(malloc(6), buf+16, 6);
+            //dodajemy znak konca stringa
             username[9] = '\0';
             password[5] = '\0';
+            //sprawdzamy czy dane logowania sa poprawne
             if (check_credentials(username, password)){
                 add_user(c->cfd, username);
                 send_msg(c->cfd, "LOGIN_OK\n\n");
@@ -309,17 +367,20 @@ void* cthread(void* arg){
             sender[9] = '\0';
             receiver[9] = '\0';
             content[256] = '\0';
+            //sprawdzamy czy odbiorca jest zalogowany
             int receiver_fd = find_user(receiver);
+            //jesli jest to wysylamy mu wiadomosc i dodajemy ja do bazy danych
             if(receiver_fd != -1){
                 char msg[512];
                 sprintf(msg, "MESSAGE\n%s\n%s\n\n", sender, content);
                 send_msg(receiver_fd, msg);
                 add_msg_to_db(sender, receiver, content, 1);
-                char* msg_sent = "MESSAGE_SENT\n\n";
+                char* msg_sent = "DELIVERED\n\n";
                 send_msg(c->cfd, msg_sent);
+            //jesli nie to dodajemy wiadomosc do bazy danych i wysylamy komunikat o niepowodzeniu
             }else{
                 add_msg_to_db(sender, receiver, content, 0);
-                char* msg_not_delivered = "MESSAGE_NOT_DELIVERED\n\n";
+                char* msg_not_delivered = "NOT_DELIVERED\n\n";
                 send_msg(c->cfd, msg_not_delivered);
             }
             free(sender);
@@ -328,6 +389,7 @@ void* cthread(void* arg){
         }else if(strncmp(buf, "GET_USER_LIST", 13) == 0){
             char* user = memcpy(malloc(10), buf+14, 10);
             user[9] = '\0';
+            //wysylamy liste uzytkownikow z ktorymi komunikowal sie klient
             get_user_list(c->cfd, user);
             free(user);
         }
@@ -336,11 +398,13 @@ void* cthread(void* arg){
             user1[9] = '\0';
             char* user2 = memcpy(malloc(10), buf+27, 10);
             user2[9] = '\0';
+            //wysylamy wszystkie wiadomosci miedzy podanymi uzytkownikami
             read_msg_from_db(c->cfd, user1, user2);
             
             free(user1);
             free(user2);
         }else if(strncmp(buf, "LOGOUT", 6) == 0){
+            //usuwamy uzytkownika z listy zalogowanych, wysylamy komunikat o poprawnym wylogowaniu i zamykamy polaczenie
             delete_user(c->cfd);
             _write(c->cfd, "LOGOUT_OK\n\n", 11);
             close(c->cfd);
@@ -362,7 +426,7 @@ int main(int argc, char**argv) {
     struct sockaddr_in saddr, caddr;
     char buf[256];
     
-    signal(SIGCHLD, childend);
+
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = INADDR_ANY; //dowolny adres ip ktory mamy skonfigurowany
     saddr.sin_port = htons(1234);
