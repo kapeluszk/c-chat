@@ -35,6 +35,8 @@ void add_user(int fd, char* id){
 int find_user(char* id){
     User *current = users;
     while(current != NULL){
+        // printf("im checking user: %s\n", current->id);
+        // printf("result: %d\n", strcmp(current->id, id));
         if(strcmp(current->id, id) == 0){
             return current->fd;
         }
@@ -173,8 +175,10 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-//funkcja przyjmuje zapytanie sql i wysyla wynik do klienta w postaci pliku json
-void read_msg_from_db(int cfd, const char* query) {
+
+void read_msg_from_db(int cfd, const char* user1, const char* user2) {
+    char query[256];
+    sprintf(query, "SELECT * FROM Messages WHERE (sender='%s' AND receiver='%s') OR (sender='%s' AND receiver='%s');", user1, user2, user2, user1);
     char* err = 0;
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
@@ -182,18 +186,43 @@ void read_msg_from_db(int cfd, const char* query) {
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
+    _write(cfd, "ALL_MESSAGES\n", 13);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        char json_row[1024];
-        snprintf(json_row, sizeof(json_row), 
-                 "{\"sender\": \"%s\", \"recipient\": \"%s\", \"message\": \"%s\", \"timestamp\": \"%s\", \"status\": %d}",
+        char msg[1024];
+        snprintf(msg, sizeof(msg), 
+                 "%s\n%s\n%s\n%s\n%d",
                  //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiersza
                  sqlite3_column_text(stmt, 1),
                  sqlite3_column_text(stmt, 2),
                  sqlite3_column_text(stmt, 3),
                  sqlite3_column_text(stmt, 4),
                  sqlite3_column_int(stmt, 5));
-        _write(cfd, json_row, strlen(json_row));
+        _write(cfd, msg, strlen(msg));
         
+    }
+    _write(cfd,"\n\n",2);
+    sqlite3_finalize(stmt);
+}
+
+
+//funkcja na podstawie podanego id zwraca liste użytkowników, z którymi wysyłał wiadomości
+void get_user_list(int cfd, const char* user){
+    char query[256];
+    sprintf(query, "SELECT DISTINCT CASE WHEN sender = '%s' THEN receiver WHEN receiver = '%s' THEN sender END AS user FROM Messages WHERE sender = '%s' OR receiver = '%s';", user, user, user, user);
+    char* err = 0;
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    _write(cfd, "USER_LIST\n", 10);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), 
+                 "%s\n",
+                 sqlite3_column_text(stmt, 1));
+        _write(cfd, msg, strlen(msg));
     }
     _write(cfd,"\n\n",2);
     sqlite3_finalize(stmt);
@@ -275,15 +304,15 @@ void* cthread(void* arg){
             free(password);
         }else if(strncmp(buf, "SEND_MESSAGE", 12) == 0){
             char* sender = memcpy(malloc(10), buf+13, 10);
-            char* receiver = memcpy(malloc(10), buf+24, 10);
-            char* content = memcpy(malloc(256), buf+35, 256);
-            sender[10] = '\0';
-            receiver[10] = '\0';
+            char* receiver = memcpy(malloc(10), buf+23, 10);
+            char* content = memcpy(malloc(256), buf+33, 256);
+            sender[9] = '\0';
+            receiver[9] = '\0';
             content[256] = '\0';
             int receiver_fd = find_user(receiver);
             if(receiver_fd != -1){
                 char msg[512];
-                sprintf(msg, "MESSAGE\n\n{\"sender\": \"%s\", \"message\": \"%s\"}\n\n", sender, content);
+                sprintf(msg, "MESSAGE\n%s\n%s\n\n", sender, content);
                 send_msg(receiver_fd, msg);
                 add_msg_to_db(sender, receiver, content, 1);
                 char* msg_sent = "MESSAGE_SENT\n\n";
@@ -296,15 +325,24 @@ void* cthread(void* arg){
             free(sender);
             free(receiver);
             free(content);
-        }else if(strncmp(buf, "GET_ALL_MESSAGES", 16) == 0){
-            char* user = memcpy(malloc(10), buf+17, 10);
-            user[10] = '\0';
-            char query[256];
-            sprintf(query, "SELECT * FROM Messages WHERE receiver='%s' OR sender='%s';", user, user);
-            read_msg_from_db(c->cfd, query);
+        }else if(strncmp(buf, "GET_USER_LIST", 13) == 0){
+            char* user = memcpy(malloc(10), buf+14, 10);
+            user[9] = '\0';
+            get_user_list(c->cfd, user);
             free(user);
+        }
+        else if(strncmp(buf, "GET_ALL_MESSAGES", 16) == 0){
+            char* user1 = memcpy(malloc(10), buf+17, 10);
+            user1[9] = '\0';
+            char* user2 = memcpy(malloc(10), buf+27, 10);
+            user2[9] = '\0';
+            read_msg_from_db(c->cfd, user1, user2);
+            
+            free(user1);
+            free(user2);
         }else if(strncmp(buf, "LOGOUT", 6) == 0){
             delete_user(c->cfd);
+            _write(c->cfd, "LOGOUT_OK\n\n", 11);
             close(c->cfd);
             free(c);
             return NULL;

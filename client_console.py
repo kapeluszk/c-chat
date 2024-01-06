@@ -3,6 +3,21 @@
 
 import socket
 import threading
+import json
+
+class message:
+    def __init__(self,comunicate, sender, recipient, body):
+        self.comunicate = comunicate
+        self.sender = sender
+        self.recipient = recipient
+        self.body = body
+
+def process_message(msg, current_user):
+    mess = msg.split("\n")
+    if mess[0] == "MESSAGE":
+        return message(mess[0], mess[1], current_user, mess[2])
+    return mess
+    
 
 def recv_until_newline(client_socket):
     data = b""
@@ -35,10 +50,12 @@ def send_func(socket, login):
         else:
             print("Nieprawidłowy wybór")
 
-def recv_func(socket):
+def recv_func(socket, login):
     while True:
         response = recv_until_newline(socket)
-        print(response)
+        message = process_message(response, login)
+        print("Otrzymano wiadomość od {}: {}".format(message.sender, message.body))
+        
 
 def main():
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -56,9 +73,10 @@ def main():
         print("Wysłano wiadomość do serwera")
         response = recv_until_newline(client_socket).strip()
 
+
     try:
         send_thread = threading.Thread(target=send_func, args=(client_socket, login))
-        recv_thread = threading.Thread(target=recv_func, args=(client_socket,))
+        recv_thread = threading.Thread(target=recv_func, args=(client_socket, login))
         send_thread.start()
         recv_thread.start()
         send_thread.join()
