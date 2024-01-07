@@ -183,44 +183,6 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-//funkcja na podstawie podanych uzytkownikow zwraca wszystkie wiadomosci miedzy nimi
-void read_msg_from_db(int cfd, const char* user1, const char* user2) {
-    char query[256];
-    sprintf(query, "SELECT * FROM Messages WHERE (sender='%s' AND receiver='%s') OR (sender='%s' AND receiver='%s');", user1, user2, user2, user1);
-    char* err = 0;
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
-        exit(EXIT_FAILURE);
-    }
-    //tablica przechowujaca id wiadomosci do aktualizacji - wysylamy wiadomosci do klienta i zmieniamy status na 1 (dostarczona)
-    int toUpdate[100];
-    int i = 0;
-    _write(cfd, "ALL_MESSAGES\n", 13);
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        char msg[1024];
-        //jesli status wiadomosci jest 0 to dodajemy id do listy wiadomosci do aktualizacji
-        if (sqlite3_column_int(stmt, 5) == 0){
-            toUpdate[i] = sqlite3_column_int(stmt, 0);
-            i++;
-        }
-        snprintf(msg, sizeof(msg), 
-                 "%s\n%s\n%s\n%s\n%d",
-                 //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiadomosci
-                 sqlite3_column_text(stmt, 1),
-                 sqlite3_column_text(stmt, 2),
-                 sqlite3_column_text(stmt, 3),
-                 sqlite3_column_text(stmt, 4),
-                 sqlite3_column_int(stmt, 5));
-        _write(cfd, msg, strlen(msg));
-        
-    }
-    _write(cfd,"\n\n",2);
-    update_msg_status(toUpdate, 100);
-    sqlite3_finalize(stmt);
-}
-
 //funkcja aktualizuje status wiadomosci na 1 (dostarczona) na podstawie listy id wiadomosci
 void update_msg_status(int msgList[], int size){
     char query[256];
@@ -236,10 +198,55 @@ void update_msg_status(int msgList[], int size){
     char* err = 0;
     int rc = sqlite3_exec(db, query, 0, 0, &err);
     if (rc != SQLITE_OK) {
+        printf("%s\n", query);
         fprintf(stderr, "SQL error: %s\n", err);
         exit(EXIT_FAILURE);
     }
 }
+
+//funkcja na podstawie podanych uzytkownikow zwraca wszystkie wiadomosci miedzy nimi
+void read_msg_from_db(int cfd, const char* user1, const char* user2) {
+    char query[256];
+    sprintf(query, "SELECT * FROM Messages WHERE (sender='%s' AND receiver='%s') OR (sender='%s' AND receiver='%s');", user1, user2, user2, user1);
+    char* err = 0;
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        printf("%s\n", query);
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
+        exit(EXIT_FAILURE);
+    }
+    //tablica przechowujaca id wiadomosci do aktualizacji - wysylamy wiadomosci do klienta i zmieniamy status na 1 (dostarczona)
+    int toUpdate[100];
+    int i = 0;
+    _write(cfd, "ALL_MESSAGES\n", 13);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        char msg[1024];
+        //jesli status wiadomosci jest 0 to dodajemy id do listy wiadomosci do aktualizacji
+        // if (sqlite3_column_int(stmt, 5) == 0){
+        //     toUpdate[i] = sqlite3_column_int(stmt, 0);
+        //     i++;
+        // }
+        snprintf(msg, sizeof(msg), 
+                 "%s/%s/%s/%s/%d/MSG_END",
+                 //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiadomosci
+                 sqlite3_column_text(stmt, 1),
+                 sqlite3_column_text(stmt, 2),
+                 sqlite3_column_text(stmt, 3),
+                 sqlite3_column_text(stmt, 4),
+                 sqlite3_column_int(stmt, 5));
+        printf("%s\n", msg);
+        _write(cfd, msg, strlen(msg));
+        
+    }
+    _write(cfd,"\n\n",2);
+    // int* toUpdateArr = malloc(i * sizeof(int));
+    // memcpy(toUpdateArr, toUpdate, i * sizeof(int));
+    // update_msg_status(toUpdateArr, sizeof(toUpdateArr)/sizeof(int));
+    sqlite3_finalize(stmt);
+}
+
+
 
 //funkcja na podstawie podanego id zwraca liste użytkowników, z którymi wysyłał wiadomości
 void get_user_list(int cfd, const char* user){
@@ -307,7 +314,7 @@ int check_credentials(const char* username, const char* password){
 
 // ---------------koniec sekcji z funkcjami do obslugi bazy danych-----------------
 
-void send_msg(int cfd, const char* msg){
+void send_msg(int cfd, char* msg){
     ssize_t bytes_written = _write(cfd, msg, strlen(msg));
     if (bytes_written < 0) {
         perror("error writing to socket");
@@ -322,7 +329,7 @@ void* cthread(void* arg){
             ntohs(c->caddr.sin_port));
 
     //wysylamy komunikat login - na niego klient odpowie swoim loginem i haslem 
-    const char* login_msg = "LOGIN\n\n";
+    char* login_msg = "LOGIN\n\n";
     send_msg(c->cfd, login_msg);
     
     char buf[512];

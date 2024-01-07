@@ -3,21 +3,55 @@
 
 import socket
 import threading
-import json
 
-class message:
+
+
+class Message:
     def __init__(self,comunicate, sender, recipient, body):
         self.comunicate = comunicate
         self.sender = sender
         self.recipient = recipient
         self.body = body
 
-def process_message(msg, current_user):
-    mess = msg.split("\n")
-    if mess[0] == "MESSAGE":
-        return message(mess[0], mess[1], current_user, mess[2])
-    return mess
+class Chat:
+    def __init__(self, user1, user2, messages):
+        self.user1 = user1
+        self.user2 = user2
+        self.messages = []
     
+    def add_message(self, message):
+        self.messages.append(message)
+
+    def __str__(self):
+        print("Chat między {} a {}\n".format(self.user1, self.user2))
+        for message in self.messages:
+            print("Od {}: {}\n".format(message.sender, message.body))
+            
+def sanitize_message(msg):
+    return msg.replace("\n", "")
+
+def process_message(msg, current_user,chats):
+    mess = msg.split("\n",1)
+    if mess[0] == "MESSAGE":
+        return message(mess[0], mess[1], current_user, sanitize_message(mess[2]))
+    elif mess[0] == "DELIVERED":
+        print("Wiadomość dostarczona do odbiorcy")
+    elif mess[0] == "NOT_DELIVERED":
+        print("Wiadomość nie dostarczona do odbiorcy")
+    elif mess[0] == "ALL_MESSAGES":
+        list_of_messages = mess[1].split("MSG_END")
+        
+        first_message = list_of_messages[0].split("/")
+        chat = Chat(first_message[0], first_message[1], [])
+
+        for i in range(0, len(list_of_messages)-1):
+            message = list_of_messages[i].split("/")
+            new_message = Message("MESSAGE", message[0], message[1], sanitize_message(message[2]))
+            chat.add_message(new_message)
+
+        chats.append(chat)
+
+
 
 def recv_until_newline(client_socket):
     data = b""
@@ -41,7 +75,8 @@ def send_func(socket, login):
             response = recv_until_newline(socket)
             print(response)
         elif choice == "2":
-            message = "GET_ALL_MESSAGES\n{}\n\n".format(login)
+            recipient = input("Podaj od kogo wiadomości chcesz wyświetlić: ")
+            message = "GET_ALL_MESSAGES\n{}\n{}\n\n".format(login, recipient)
             socket.sendall(message.encode())
             print("Wysłano wiadomość do serwera")
         elif choice == "3":
@@ -50,11 +85,17 @@ def send_func(socket, login):
         else:
             print("Nieprawidłowy wybór")
 
-def recv_func(socket, login):
+def recv_func(socket, login, chats):
     while True:
         response = recv_until_newline(socket)
-        message = process_message(response, login)
-        print("Otrzymano wiadomość od {}: {}".format(message.sender, message.body))
+        process_message(response, login, chats)
+        
+        # if message.comunicate is not None:
+        #     if message.comunicate == "LOGOUT_OK":
+        #         print("Wylogowano")
+        #         break
+        #     else:
+        #         print("Otrzymano wiadomość od {}: {}".format(message.sender, message.body))
         
 
 def main():
@@ -65,7 +106,6 @@ def main():
 
     response = recv_until_newline(client_socket)
     while response != "LOGIN_OK":
-        print(response)
         login = input("Wpisz login: ")
         password = input("Wpisz hasło: ")
         login_msg = "LOGIN\n{}\n{}\n\n".format(login, password)
@@ -73,10 +113,11 @@ def main():
         print("Wysłano wiadomość do serwera")
         response = recv_until_newline(client_socket).strip()
 
+    chat_list = []
 
     try:
         send_thread = threading.Thread(target=send_func, args=(client_socket, login))
-        recv_thread = threading.Thread(target=recv_func, args=(client_socket, login))
+        recv_thread = threading.Thread(target=recv_func, args=(client_socket, login, chat_list))
         send_thread.start()
         recv_thread.start()
         send_thread.join()
