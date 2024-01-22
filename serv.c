@@ -210,7 +210,7 @@ void init_db(){
 //funkcja dodaje wiadomosc do bazy danych
 void add_msg_to_db(const char* sender, const char* receiver, const char* content, int status){
     char* err = 0;
-    char query[256];
+    char query[2048];
     sprintf(query, "INSERT INTO Messages (sender, receiver, content, status) VALUES ('%s', '%s', '%s', '%d');", sender, receiver, content, status);
     int rc = sqlite3_exec(db, query, 0, 0, &err);
     if (rc != SQLITE_OK) {
@@ -256,7 +256,7 @@ void read_msg_from_db(int cfd, const char* user1, const char* user2) {
     sprintf(packet, "%s\n", GET_ALL_MESSAGES);
     send_msg(cfd, packet);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        char msg[1024];
+        char msg[2048];
         //jesli status wiadomosci jest 0 to dodajemy id do listy wiadomosci do aktualizacji
         // if (sqlite3_column_int(stmt, 5) == 0){
         //     toUpdate[i] = sqlite3_column_int(stmt, 0);
@@ -394,6 +394,7 @@ void* cthread(void* arg){
         //jesli read zwroci mniej niz 0 to znaczy ze wystapil blad
         }else if (rc < 0) {
             perror("error reading from socket");
+            delete_user(c->cfd);
             close(c->cfd);
             free(c);
             return NULL;

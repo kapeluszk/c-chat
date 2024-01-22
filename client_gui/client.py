@@ -86,12 +86,17 @@ def close_app(working_flag, socket):
     sys.exit(0)
 
 def on_close(socket,working_flag, current_user, system_info_queue):
+    counter = 0
     while True:
         try:
             if logout(socket, current_user, system_info_queue):
                 break
         except:
+            if counter == 5:
+                print("wylogowanie nie powiodło się po 5 próbach, zamykanie aplikacji awaryjnie")
+                close_app(working_flag, socket)
             print("wylogowanie nie powiodło się, ponawiam próbę")
+            counter += 1
 
     print("wylogowanie powiodło się")
     close_app(working_flag, socket)
@@ -107,10 +112,12 @@ def show_server_ip_popup():
             except ValueError:
                 tk.messagebox.showerror("Błąd", "Niepoprawny adres IP. Spróbuj ponownie.")
         else:
-            break
+            tk.messagebox.showerror("Błąd", "Niepoprawny adres IP. Spróbuj ponownie.")
 
 
 def login(client_socket):
+        response = recv_until_newline(client_socket)
+        print(response)
         while True:
             login = tk.simpledialog.askstring("Logowanie", "Podaj login:")
             password = tk.simpledialog.askstring("Logowanie", "Podaj hasło:", show="*")
@@ -119,8 +126,8 @@ def login(client_socket):
 
             
             
-            response = recv_until_newline(client_socket)
-            print(response)
+            
+            
             if response == LOGIN or response == LOGIN_NOT_OK:
                 login_msg = "{}\n{}\n{:02d}\n{}\n\n".format(LOGIN, login, len(password), password)
                 client_socket.sendall(login_msg.encode())
@@ -281,7 +288,7 @@ def start_chat(current_user, contact, chats, socket, system_info_queue):
         return False
     
 
-def open_chat_window(current_user, contact, chats, socket, system_info_queue):
+def open_chat_window(current_user, contact, chats, socket):
     chat_window = ttk.Window()
     chat_window.title("Czat z {}".format(contact))
     chat_window.geometry("400x500")
@@ -297,7 +304,12 @@ def open_chat_window(current_user, contact, chats, socket, system_info_queue):
     chat_window.grid_rowconfigure(0, weight=4)  # 80% wysokości dla messages_text
     chat_window.grid_columnconfigure(0, weight=1)  # 100% szerokości dla messages_text
 
-    message_entry = ttk.Entry(chat_window)
+    def validate_length(P):
+        return len(P) <= 250
+
+    vcmd = (chat_window.register(validate_length), '%P')
+
+    message_entry = ttk.Entry(chat_window, validate='key', validatecommand=vcmd)
     message_entry.grid(row=1, column=0, sticky='nsew')
 
     def on_send_button_click():
@@ -409,7 +421,7 @@ def main():
     # Funkcja do otwierania okna czatu po kliknięciu na kontakt
     def on_contact_select(event):
         selected_contact = contacts_listbox.get(contacts_listbox.curselection())
-        open_chat_window(current_user,selected_contact, chat_list, client_socket, system_info_queue)
+        open_chat_window(current_user,selected_contact, chat_list, client_socket)
     
     def on_start_chat_button_click():
         while True:
