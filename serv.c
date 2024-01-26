@@ -431,12 +431,12 @@ void* cthread(void* arg){
                 free(username);
                 free(password);
             }else if(strncmp(packet_code, SEND_MESSAGE, 2) == 0){
-                char* sender = memcpy(malloc(10), buf+3, 10);
-                char* receiver = memcpy(malloc(10), buf+13, 10);
-                char* content = memcpy(malloc(256), buf+23, 256);
+                char* sender = memcpy(malloc(10), buf+3, 9);
+                char* receiver = memcpy(malloc(10), buf+13, 9);
+                char* content = memcpy(malloc(2025), buf+23, 2024);
                 sender[9] = '\0';
                 receiver[9] = '\0';
-                content[256] = '\0';
+                content[2024] = '\0';
                 printf("%s wysyła wiadomość do %s\n", sender, receiver);
                 //sprawdzamy czy odbiorca jest zalogowany
                 int receiver_fd = find_user(receiver);
