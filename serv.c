@@ -49,8 +49,6 @@ User *users = NULL;
 int find_user(char* id){
     User *current = users;
     while(current != NULL){
-        // printf("im checking user: %s\n", current->id);
-        // printf("result: %d\n", strcmp(current->id, id));
         if(strcmp(current->id, id) == 0){
             return current->fd;
         }
@@ -219,26 +217,6 @@ void add_msg_to_db(const char* sender, const char* receiver, const char* content
     }
 }
 
-//funkcja aktualizuje status wiadomosci na 1 (dostarczona) na podstawie listy id wiadomosci
-void update_msg_status(int msgList[], int size){
-    char query[256];
-    //przygotowujemy zapytanie UPDATE Messages SET status=1 WHERE id IN (1,2,3,4,5...);
-    sprintf(query, "UPDATE Messages SET status=1 WHERE id IN (");
-    for(int i = 0; i < size; i++){
-        char id[10];
-        sprintf(id, "%d,", msgList[i]);
-        strcat(query, id);
-    }
-    query[strlen(query) - 1] = ')';  // zamieniamy ostatni przecinek na nawias zamykajacy
-    strcat(query, ";");
-    char* err = 0;
-    int rc = sqlite3_exec(db, query, 0, 0, &err);
-    if (rc != SQLITE_OK) {
-        printf("%s\n", query);
-        fprintf(stderr, "SQL error: %s\n", err);
-        exit(EXIT_FAILURE);
-    }
-}
 
 //funkcja na podstawie podanych uzytkownikow zwraca wszystkie wiadomosci miedzy nimi
 void read_msg_from_db(int cfd, const char* user1, const char* user2) {
@@ -251,17 +229,11 @@ void read_msg_from_db(int cfd, const char* user1, const char* user2) {
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db));
         exit(EXIT_FAILURE);
     }
-    //tablica przechowujaca id wiadomosci do aktualizacji - wysylamy wiadomosci do klienta i zmieniamy status na 1 (dostarczona)
     char packet[30];
     sprintf(packet, "%s\n", GET_ALL_MESSAGES);
     send_msg(cfd, packet);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         char msg[2048];
-        //jesli status wiadomosci jest 0 to dodajemy id do listy wiadomosci do aktualizacji
-        // if (sqlite3_column_int(stmt, 5) == 0){
-        //     toUpdate[i] = sqlite3_column_int(stmt, 0);
-        //     i++;
-        // }
         snprintf(msg, sizeof(msg), 
                  "%s\n%s\n%s\n%s\n%d/MSG_END",
                  //sqlite column zaczyna sie od 0 nie 1 bo 0 to identyfikatory wiadomosci
@@ -274,9 +246,6 @@ void read_msg_from_db(int cfd, const char* user1, const char* user2) {
         
     }
     _write(cfd,"\n\n",2);
-    // int* toUpdateArr = malloc(i * sizeof(int));
-    // memcpy(toUpdateArr, toUpdate, i * sizeof(int));
-    // update_msg_status(toUpdateArr, sizeof(toUpdateArr)/sizeof(int));
     sqlite3_finalize(stmt);
 }
 
@@ -303,7 +272,6 @@ void get_user_list(int cfd, const char* user){
                  "%s/USER_END",
                  sqlite3_column_text(stmt, 0));
         send_msg(cfd, msg);
-        printf("%s\n", msg);
     }
     //wysylamy znaki konca komunikatu
     _write(cfd,"\n\n",2);
@@ -418,10 +386,7 @@ void* cthread(void* arg){
                     char msg[50];
                     sprintf(msg, "%s\n\n", LOGIN_OK);
                     send_msg(c->cfd, msg);
-                    list_users();
                 }else{
-                    printf("%s\n", username);
-                    printf("%s\n", password);
                     char msg[50];
                     sprintf(msg, "%s\n\n", LOGIN_NOT_OK);
                     send_msg(c->cfd, msg);
@@ -442,7 +407,7 @@ void* cthread(void* arg){
                 int receiver_fd = find_user(receiver);
                 //jesli jest to wysylamy mu wiadomosc i dodajemy ja do bazy danych
                 if(receiver_fd != -1){
-                    char msg[512];
+                    char msg[2048];
                     sprintf(msg, "%s\n%s\n%s\n\n", SEND_MESSAGE, sender, content);
                     send_msg(receiver_fd, msg);
                     add_msg_to_db(sender, receiver, content, 1);
