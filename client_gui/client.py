@@ -160,7 +160,7 @@ def start_connection():
 ######### PRZETWARZANIE WIADOMOŚCI #########
 
 # funkcja przetwarzająca wiadomości - sprawdza kod komunikatu i wykonuje odpowiednie akcje
-def process_message(message, current_user, chats, contacts, system_info_queue, messages_queue):
+def process_message(message, current_user, chats, contacts, system_info_queue, system_info_queue2, messages_queue):
     
     mess = message.split("\n",1)
     if mess[0] == SEND_MESSAGE:
@@ -194,9 +194,9 @@ def process_message(message, current_user, chats, contacts, system_info_queue, m
             with chat_lock:
                 chat.add_message(new_message)
     elif mess[0] == EXISTS:
-        system_info_queue.put(Message(EXISTS, "SERVER", current_user, "", timestamp()))
+        system_info_queue2.put(Message(EXISTS, "SERVER", current_user, "", timestamp()))
     elif mess[0] == NOT_EXISTS:
-        system_info_queue.put(Message(NOT_EXISTS, "SERVER", current_user, "", timestamp()))
+        system_info_queue2.put(Message(NOT_EXISTS, "SERVER", current_user, "", timestamp()))
     elif mess[0] == LOGOUT_OK:
         system_info_queue.put(Message(LOGOUT_OK, "SERVER", current_user, "", timestamp()))
     elif mess[0] == LOGOUT_NOT_OK:
@@ -212,11 +212,11 @@ def process_message(message, current_user, chats, contacts, system_info_queue, m
         pass
 
 # funkcja odbierająca wiadomości od serwera uruchamiana w osobnym wątku
-def recv_func(working_flag, socket, login, chats, contacts, system_info_queue, messages_queue):
+def recv_func(working_flag, socket, login, chats, contacts, system_info_queue, system_info_queue2, messages_queue):
     while not working_flag.is_set():
         response = recv_until_newline(socket)
         if response:
-            process_message(response, login, chats, contacts, system_info_queue, messages_queue)
+            process_message(response, login, chats, contacts, system_info_queue, system_info_queue2, messages_queue)
 
 # funkcja odbierająca listę wszystkich użytkowników, z którymi wcześniej prowadzono rozmowy
 def fetch_contacts(client_socket, login, contacts, chats, current_user):
@@ -264,7 +264,7 @@ def fetch_messages(client_socket, login, chats, contacts):
 
                 list_of_messages[i] = sanitize_incoming_msg(list_of_messages[i])
                 message = list_of_messages[i].split("\n")
-                
+
                 new_message = Message(SEND_MESSAGE, message[0], message[1], message[2], message[3])
                 chat.add_message(new_message)
     return True
@@ -289,17 +289,21 @@ def queue_checker(working_flag, messages_queue, chats, root):
 ######### OKNA CZATU #########
 
 # funkcja sprawdzająca, czy użytkownik istnieje i jeśli tak, to czy istnieje już czat z nim
-def start_chat(current_user, contact, chats, socket, system_info_queue):
+def start_chat(current_user, contact, chats, socket, system_info_queue2):
     check_packet = "{}\n{}\n\n".format(CHECK_IF_USER_EXISTS,contact)
     socket.sendall(check_packet.encode())
     try:
-        response = system_info_queue.get(timeout=1)
+        response = system_info_queue2.get(timeout=1)
+        print(response.communicate)
         if response.communicate == EXISTS:
             if find_chat(current_user, contact, chats) is None:
                 with chat_lock:
                     chat = Chat(current_user, contact, [])
                     chats.append(chat)
             return True
+        else:
+            tk.messagebox.showerror("Błąd", "Użytkownik nie istnieje")
+            return False
     except queue.Empty:
         tk.messagebox.showerror("Błąd", "Użytkownik nie istnieje")
         return False
@@ -334,13 +338,15 @@ def open_chat_window(current_user, contact, chats, socket):
     # Funkcja do wysyłania wiadomości
     def on_send_button_click():
         message = message_entry.get()
-        message = sanitize_outgoing_msg(message)
-        message_packet = "{}\n{}\n{}\n{}\n\n".format(SEND_MESSAGE, current_user, contact, message)
-        socket.sendall(message_packet.encode())
-        new_message = Message(SEND_MESSAGE, current_user, contact, message, timestamp())
-        chat.add_message(new_message)
-        messages_text.insert(tk.END, "{} {}: {}\n".format(new_message.timestamp,current_user, message))
-        message_entry.delete(0, tk.END)
+        if message != "":
+            message = sanitize_outgoing_msg(message)
+            message_packet = "{}\n{}\n{}\n{}\n\n".format(SEND_MESSAGE, current_user, contact, message)
+            socket.sendall(message_packet.encode())
+            new_message = Message(SEND_MESSAGE, current_user, contact, message, timestamp())
+            with chat_lock:
+                chat.add_message(new_message)
+            messages_text.insert(tk.END, "{} {}: {}\n".format(new_message.timestamp,current_user, message))
+            message_entry.delete(0, tk.END)
 
     send_button = ttk.Button(chat_window, text="Wyślij", command=on_send_button_click)
     send_button.grid(row=1, column=1, sticky='nsew')
@@ -401,11 +407,12 @@ def main():
     contacts = []
     messages_queue = queue.Queue()
     system_info_queue = queue.Queue()
+    system_info_queue2 = queue.Queue()
 
     fetch_contacts(client_socket, current_user, contacts, chat_list, current_user)
     fetch_messages(client_socket, current_user, chat_list, contacts)
 
-    recv_thread = threading.Thread(target=recv_func, args=(working_flag, client_socket, current_user, chat_list, contacts, system_info_queue, messages_queue))
+    recv_thread = threading.Thread(target=recv_func, args=(working_flag, client_socket, current_user, chat_list, contacts, system_info_queue, system_info_queue2, messages_queue))
     recv_thread.start()
 
     q_checker_thread = threading.Thread(target=queue_checker, args=(working_flag, messages_queue, chat_list, root))
@@ -439,12 +446,14 @@ def main():
             if user_to_chat == current_user:
                 tk.messagebox.showerror("Błąd", "Nie możesz rozpocząć czatu ze sobą")
             else:
-                if start_chat(current_user, user_to_chat, chat_list, client_socket, system_info_queue):
+                if start_chat(current_user, user_to_chat, chat_list, client_socket, system_info_queue2):
                     if user_to_chat not in contacts:
                         with contacts_lock:
                             contacts.append(user_to_chat)
                         contacts_listbox.insert(tk.END, user_to_chat)
                     open_chat_window(current_user, user_to_chat, chat_list, client_socket)
+                    break
+                else:
                     break
 
     start_chat_button.config(command=on_start_chat_button_click)
