@@ -107,7 +107,6 @@ def on_close(socket,working_flag, current_user, system_info_queue):
 
 def login(client_socket):
         response = recv_until_newline(client_socket)
-        print(response)
         while True:
             login = tk.simpledialog.askstring("Logowanie", "Podaj login:")
             password = tk.simpledialog.askstring("Logowanie", "Podaj hasło:", show="*")
@@ -270,7 +269,7 @@ def fetch_messages(client_socket, login, chats, contacts):
     return True
 
 # funkcja sprawdzająca kolejkę wiadomości i dodająca je do odpowiednich czatów
-def queue_checker(working_flag, messages_queue, chats, root):
+def queue_checker(working_flag, messages_queue, chats, contacts_listbox, contacts):
     while not working_flag.is_set():
         if not messages_queue.empty():
             msg = messages_queue.get()
@@ -280,6 +279,9 @@ def queue_checker(working_flag, messages_queue, chats, root):
                 chat = Chat(msg.sender, msg.recipient, [])
                 with chat_lock:
                     chats.append(chat)
+                with contacts_lock:
+                    contacts.append(msg.sender)
+                contacts_listbox.insert(tk.END, msg.sender)
             with chat_lock:
                 chat.add_message(msg)
         time.sleep(1)
@@ -415,8 +417,6 @@ def main():
     recv_thread = threading.Thread(target=recv_func, args=(working_flag, client_socket, current_user, chat_list, contacts, system_info_queue, system_info_queue2, messages_queue))
     recv_thread.start()
 
-    q_checker_thread = threading.Thread(target=queue_checker, args=(working_flag, messages_queue, chat_list, root))
-    q_checker_thread.start()
 
     # przywrócenie wyświetlania okna głównego
     root.deiconify()
@@ -433,6 +433,9 @@ def main():
     for contact in contacts:
         contacts_listbox.insert(tk.END, contact)
     contacts_listbox.pack()
+
+    q_checker_thread = threading.Thread(target=queue_checker, args=(working_flag, messages_queue, chat_list, contacts_listbox, contacts))
+    q_checker_thread.start()
 
     # Funkcja do otwierania okna czatu po kliknięciu na kontakt
     def on_contact_select(event):
